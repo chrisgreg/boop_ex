@@ -31,11 +31,12 @@ boop_ex sends events to a self-hosted Boop server so the developer gets a push n
   Boop.send_async(title: "Payment received", body: "£19.99", level: :success, source: "polar", data: %{customer_id: id})
   ```
 
-- Fields: `title` (required, ≤200 chars), `body` (≤4000), `level`, `source`, `type`, `external_id`, `fingerprint`, `occurred_at` (`DateTime`, `NaiveDateTime` or ISO 8601), `data` (map). Over-long strings are truncated, not rejected.
+- Fields: `title` (required, ≤200 chars), `body` (≤4000), `level`, `source`, `type`, `external_id`, `fingerprint`, `occurred_at` (`DateTime`, `NaiveDateTime` or ISO 8601), `data` (map), `actions` (list, ≤3). Over-long strings are truncated, not rejected.
 - Levels are atoms: `:info` (default), `:success`, `:warning`, `:error`, `:critical`. `:critical` produces a prominent push; reserve it for outages. Unknown levels return `{:error, %Boop.Error{code: :invalid}}`.
 - Keep `title` short and specific ("Deploy failed: uini", not "Error"). Put detail in `body`; put structured facts in `data`, not interpolated into `body`.
 - `data` must be a map (keyword lists are converted). Values must be JSON-serialisable; structs are converted to maps. Keep it under 256 KB or it is dropped with a note in `body`.
-- Use `fingerprint` for "the same problem again" (e.g. `"#{module}-#{reason}"`), `external_id` for your own record id, `type` for a category within the source (`"deploy"`, `"job"`, `"error"`).
+- Use `fingerprint` for "the same problem again" (e.g. `"#{module}-#{reason}"`), `external_id` for your own record id, `type` for a category within the source (`"deploy"`, `"job"`, `"error"`). Boop groups events sharing a fingerprint into one inbox row with a count, so always send one for anything that can repeat (job failures, alerts, recurring errors).
+- `actions` adds buttons to the push and the event detail that open a URL: `actions: [%{label: "Open deploy", url: run_url}]` or `Boop.Event.action(label, url)`. At most 3; label ≤40 chars; URL must be absolute (`https://…` or an app scheme). Use them whenever there is an obvious place to go next (the CI run, the Stripe payment, the admin page for the record). A missing label or URL returns `{:error, %Boop.Error{code: :invalid}}`.
 
 ## Error events
 

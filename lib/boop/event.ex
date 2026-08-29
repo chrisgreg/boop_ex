@@ -13,9 +13,30 @@ defmodule Boop.Event do
   | `fingerprint` | a stable grouping key |
   | `occurred_at` | `DateTime`, `NaiveDateTime` (assumed UTC) or ISO 8601 string; defaults to now |
   | `data` | a map of anything JSON-serialisable; sensitive keys are redacted before sending |
+  | `actions` | up to 3 buttons, `[%{label: "Open deploy", url: "https://…"}]`, shown on the push and in the event |
 
   The keys `exception`, `stacktrace`, `tags`, `context` and `breadcrumbs` inside `data`
   get a rich rendering in Boop. See `Boop.Event.exception/3` for a helper.
+
+  ## Fingerprints and grouping
+
+  Boop collapses events that share a `fingerprint` within a project into one inbox row
+  ("KeyError ×47 · First seen 09:31 · Last seen 10:42") that opens the individual
+  occurrences. Send a stable fingerprint for "the same thing happening again"
+  (`"\#{module}-\#{reason}"`, a job name, an alert id) and repeats stay tidy on the phone.
+  Every occurrence is still stored and pushed.
+
+  ## Actions
+
+  An action is a button that opens a URL: on the notification itself (long-press it) and
+  in the event detail on the web and the phone. Give a label of up to 40 characters and an
+  absolute URL (`https://…` or an app scheme such as `myapp://orders/42`).
+
+      Boop.send(title: "Payment received", body: "£19.99", level: :success,
+                actions: [%{label: "Open in Stripe", url: "https://dashboard.stripe.com/payments/pi_1"}])
+
+  Entries may be maps or keyword lists with `:label`/`:url` (atom or string keys), or
+  `{label, url}` tuples. Labels are truncated; a missing label or URL is an error.
   """
 
   alias Boop.{Config, Error, Redactor}
@@ -25,6 +46,9 @@ defmodule Boop.Event do
   @max_body 4000
   @max_short 200
   @max_data_bytes 256 * 1024
+  @max_actions 3
+  @max_action_label 40
+  @max_action_url 2048
 
   defstruct title: nil,
             body: nil,
@@ -34,9 +58,11 @@ defmodule Boop.Event do
             external_id: nil,
             fingerprint: nil,
             occurred_at: nil,
-            data: %{}
+            data: %{},
+            actions: []
 
   @type level :: :info | :success | :warning | :error | :critical
+  @type action :: %{label: String.t(), url: String.t()}
   @type t :: %__MODULE__{
           title: String.t() | nil,
           body: String.t() | nil,
@@ -46,7 +72,8 @@ defmodule Boop.Event do
           external_id: String.t() | nil,
           fingerprint: String.t() | nil,
           occurred_at: DateTime.t() | nil,
-          data: map()
+          data: map(),
+          actions: [action()]
         }
 
   @doc "The valid levels, in ascending severity."
@@ -80,7 +107,8 @@ defmodule Boop.Event do
     with {:ok, title} <- title(fields[:title]),
          {:ok, level} <- level(Map.get(fields, :level, :info)),
          {:ok, occurred_at} <- occurred_at(fields[:occurred_at]),
-         {:ok, data} <- data(fields[:data]) do
+         {:ok, data} <- data(fields[:data]),
+         {:ok, actions} <- actions(fields[:actions]) do
       {:ok,
        %__MODULE__{
          title: title,
@@ -91,7 +119,8 @@ defmodule Boop.Event do
          external_id: clip(fields[:external_id], @max_short),
          fingerprint: clip(fields[:fingerprint], @max_short),
          occurred_at: occurred_at,
-         data: data
+         data: data,
+         actions: actions
        }}
     end
   end
@@ -124,11 +153,41 @@ defmodule Boop.Event do
       "external_id" => event.external_id,
       "fingerprint" => event.fingerprint,
       "occurred_at" => event.occurred_at && DateTime.to_iso8601(event.occurred_at),
-      "data" => data
+      "data" => data,
+      "actions" => actions_payload(event.actions)
     }
     |> Enum.reject(fn {_, v} -> is_nil(v) end)
     |> Map.new()
   end
+
+  defp actions_payload([]), do: nil
+
+  # Hand-built structs may carry tuples or keyword lists; tolerate them here too.
+  defp actions_payload(actions) when is_list(actions) do
+    actions
+    |> Enum.flat_map(fn item ->
+      case action_item(item) do
+        {:ok, a} -> [%{"label" => a.label, "url" => a.url}]
+        _ -> []
+      end
+    end)
+    |> Enum.take(@max_actions)
+    |> case do
+      [] -> nil
+      list -> list
+    end
+  end
+
+  defp actions_payload(_), do: nil
+
+  @doc """
+  Builds one action for the `actions` field: a button that opens `url`.
+
+      Boop.send(title: "Deploy failed", level: :error,
+                actions: [Boop.Event.action("Open run", run_url), Boop.Event.action("Rollback", "myapp://rollback/42")])
+  """
+  @spec action(String.t(), String.t()) :: action()
+  def action(label, url), do: %{label: to_string(label), url: to_string(url)}
 
   @doc """
   Builds `data` for an error event from an exception and stacktrace, in the shape Boop renders richly.
@@ -209,6 +268,62 @@ defmodule Boop.Event do
     if Keyword.keyword?(kw), do: {:ok, Map.new(kw)}, else: {:error, Error.new(:invalid, "data must be a map")}
   end
   defp data(_), do: {:error, Error.new(:invalid, "data must be a map")}
+
+  defp actions(nil), do: {:ok, []}
+  defp actions([]), do: {:ok, []}
+
+  defp actions(list) when is_list(list) do
+    # A keyword list like [label: "x", url: "y"] is a single action, not a list of them.
+    list = if Keyword.keyword?(list) and list != [], do: [list], else: list
+
+    if length(list) > @max_actions do
+      {:error, Error.new(:invalid, "at most #{@max_actions} actions are allowed")}
+    else
+      Enum.reduce_while(list, {:ok, []}, fn item, {:ok, acc} ->
+        case action_item(item) do
+          {:ok, a} -> {:cont, {:ok, acc ++ [a]}}
+          {:error, _} = err -> {:halt, err}
+        end
+      end)
+    end
+  end
+
+  defp actions(_), do: {:error, Error.new(:invalid, "actions must be a list of %{label: ..., url: ...}")}
+
+  defp action_item({label, url}), do: action_item(%{label: label, url: url})
+  defp action_item(kw) when is_list(kw), do: if(Keyword.keyword?(kw), do: action_item(Map.new(kw)), else: action_error())
+
+  defp action_item(%{} = m) do
+    label = (Map.get(m, :label) || Map.get(m, "label")) |> blank_to_nil()
+    url = (Map.get(m, :url) || Map.get(m, "url")) |> blank_to_nil()
+
+    cond do
+      is_nil(label) -> {:error, Error.new(:invalid, "action label is required")}
+      is_nil(url) -> {:error, Error.new(:invalid, "action url is required")}
+      not absolute_url?(url) -> {:error, Error.new(:invalid, "action url must be absolute (https://... or an app scheme)")}
+      true -> {:ok, %{label: clip(label, @max_action_label), url: clip(url, @max_action_url)}}
+    end
+  end
+
+  defp action_item(_), do: action_error()
+
+  defp action_error, do: {:error, Error.new(:invalid, "actions must be a list of %{label: ..., url: ...}")}
+
+  defp blank_to_nil(nil), do: nil
+  defp blank_to_nil(v) do
+    case v |> to_string() |> String.trim() do
+      "" -> nil
+      s -> s
+    end
+  end
+
+  # The server refuses javascript:/data:/file: schemes; catch the obvious ones client-side too.
+  defp absolute_url?(url) do
+    case URI.parse(url) do
+      %URI{scheme: scheme} when is_binary(scheme) -> String.downcase(scheme) not in ~w(javascript data file vbscript)
+      _ -> false
+    end
+  end
 
   defp clip(nil, _), do: nil
   defp clip(s, max) when is_binary(s), do: if(String.length(s) > max, do: String.slice(s, 0, max - 1) <> "…", else: s)

@@ -24,7 +24,7 @@ Boop.send("Deploy complete")
 
 ```elixir
 def deps do
-  [{:boop_ex, "~> 1.0"}]
+  [{:boop_ex, "~> 1.1"}]
 end
 ```
 
@@ -85,6 +85,34 @@ end
 ```
 
 `exception`, `stacktrace`, `tags`, `context` and `breadcrumbs` in `data` get a rich rendering in the Boop web UI and iOS app. Anything else is kept as-is.
+
+### Actions
+
+Up to three buttons that open a URL, on the push itself (long-press it) and in the event detail. Open the deploy, the payment, the record:
+
+```elixir
+Boop.send_async(
+  title: "Payment received",
+  body: "£19.99",
+  level: :success,
+  actions: [
+    %{label: "Open in Stripe", url: "https://dashboard.stripe.com/payments/pi_1"},
+    Boop.Event.action("Open order", "myshop://orders/42")
+  ]
+)
+```
+
+Labels are up to 40 characters; URLs must be absolute (`https://…` or an app scheme). Needs Boop server 1.2.0 or newer (older servers ignore the field).
+
+### Grouping repeats
+
+Send the same `fingerprint` for the same problem and Boop shows one inbox row (`KeyError ×47 · First seen 09:31 · Last seen 10:42`) that opens the individual occurrences, instead of 47 rows:
+
+```elixir
+Boop.send_async(title: "Sync failed", level: :error, fingerprint: "sync-#{account.id}", body: inspect(reason))
+```
+
+Every occurrence is still stored and pushed; grouping only tidies the inbox. Use a [silence](https://github.com/chrisgreg/boop#silences) in Boop to stop pushes for a fingerprint.
 
 ### Phoenix
 

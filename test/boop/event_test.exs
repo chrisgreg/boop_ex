@@ -81,4 +81,50 @@ defmodule Boop.EventTest do
     assert [%{"function" => _, "file" => _, "line" => _, "in_app" => true} | _] = data["stacktrace"]
     assert data["tags"] == %{env: "test"}
   end
+
+  test "actions accept maps, keyword lists, string keys and tuples" do
+    {:ok, e} =
+      Event.new(
+        title: "x",
+        actions: [
+          %{label: " Open in Stripe ", url: "https://dashboard.stripe.com/p/1"},
+          [label: "App", url: "myshop://orders/42"],
+          {"GitHub", "https://github.com/x/y"}
+        ]
+      )
+
+    assert e.actions == [
+             %{label: "Open in Stripe", url: "https://dashboard.stripe.com/p/1"},
+             %{label: "App", url: "myshop://orders/42"},
+             %{label: "GitHub", url: "https://github.com/x/y"}
+           ]
+
+    assert {:ok, %Event{actions: [%{label: "One", url: "https://a"}]}} = Event.new(%{"title" => "x", "actions" => [%{"label" => "One", "url" => "https://a"}]})
+    # A single keyword list is one action.
+    assert {:ok, %Event{actions: [%{label: "Only", url: "https://a"}]}} = Event.new(title: "x", actions: [label: "Only", url: "https://a"])
+    assert {:ok, %Event{actions: []}} = Event.new(title: "x")
+    assert Event.action("Open", "https://a") == %{label: "Open", url: "https://a"}
+  end
+
+  test "action labels are truncated; malformed actions are rejected" do
+    {:ok, e} = Event.new(title: "x", actions: [%{label: String.duplicate("l", 60), url: "https://a"}])
+    assert String.length(hd(e.actions).label) == 40
+
+    assert {:error, %Error{code: :invalid, message: "action label is required"}} = Event.new(title: "x", actions: [%{url: "https://a"}])
+    assert {:error, %Error{code: :invalid, message: "action url is required"}} = Event.new(title: "x", actions: [%{label: "a", url: " "}])
+    assert {:error, %Error{code: :invalid, message: "action url must be absolute" <> _}} = Event.new(title: "x", actions: [%{label: "a", url: "/relative"}])
+    assert {:error, %Error{code: :invalid, message: "action url must be absolute" <> _}} = Event.new(title: "x", actions: [%{label: "a", url: "javascript:alert(1)"}])
+    assert {:error, %Error{code: :invalid, message: "at most 3 actions" <> _}} = Event.new(title: "x", actions: Enum.map(1..4, &{"a#{&1}", "https://a"}))
+    assert {:error, %Error{code: :invalid}} = Event.new(title: "x", actions: "nope")
+  end
+
+  test "to_payload includes actions only when present" do
+    {:ok, e} = Event.new(title: "x", occurred_at: ~U[2026-08-28 12:51:44Z], actions: [{"Open", "https://a"}])
+    assert Event.to_payload(e)["actions"] == [%{"label" => "Open", "url" => "https://a"}]
+    {:ok, plain} = Event.new(title: "x")
+    refute Map.has_key?(Event.to_payload(plain), "actions")
+    # A hand-built struct with tuples / bad entries still serialises sensibly.
+    raw = %Event{title: "x", actions: [{"Open", "https://a"}, %{"label" => "S", "url" => "https://s"}, %{label: "bad"}]}
+    assert Event.to_payload(raw)["actions"] == [%{"label" => "Open", "url" => "https://a"}, %{"label" => "S", "url" => "https://s"}]
+  end
 end
